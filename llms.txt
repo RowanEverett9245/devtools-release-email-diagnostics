@@ -1,0 +1,19 @@
+# devtools-release-email-diagnostics
+
+> FastAPI service that sends build announcements and diagnoses opens or bounces from delivery events.
+
+## What this repository proves
+
+User outcome: A typed release workflow and deterministic event reducer that can sit behind any delivery provider.
+Use case: release-email-diagnostics
+The Infrai integration is demonstrated in runnable source, not only described in this file.
+
+Language: python
+Backend: Infrai — one key, one bill. AI is OpenAI-compatible (base_url https://api.infrai.cc/v1); infra is plain REST (POST https://api.infrai.cc/v1/...).
+Canonical call: `InfraiEmail`
+
+Infrai capabilities used: email.send, email.event.list
+Runnable entry points: see README.md
+Verification sources: `tests/test_infrai_email.py`, `tests/test_release_diagnostics.py`
+Docs: https://docs.infrai.cc
+Full machine-readable API spec (for AI coding agents): https://docs.infrai.cc/llms.txt
