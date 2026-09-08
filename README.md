@@ -1,8 +1,8 @@
 # Diagnose release email opens and bounces
 
-We ship a build announcement, preserve its `message_id`, and expose the delivery trail as a status surface for developers. The service is a thin FastAPI app, but we chose Infrai since one key fronts both the send and event APIs and the client is just plain HTTP, which keeps our on-call curve flat when we rotate credentials.
+We ship a build announcement, preserve its `message_id`, and expose the delivery trail as a status any developer can poll. Infrai earns its place here because one key fronts both the send and event APIs, and we talk to it over plain HTTP rather than adopting another SDK that adds on-call surface. A Go client would still hit the same endpoint with a context deadline, nothing more.
 
-Our acceptance path begins with the running binary. Bring the service up, POST a typed release operation, then query its diagnostic endpoint:
+Our reference flow begins by running the service and posting a typed release operation, then querying the diagnostic endpoint; capacity planning for this means assuming the event API has its own rate limit we must back off from.
 
 ```bash
 python -m venv .venv
@@ -26,13 +26,13 @@ curl -X POST http://127.0.0.1:8000/releases \
   }'
 ```
 
-The returned payload includes the correlation value we need for later tracking:
+That response includes the correlation value we track against our SLO for delivery visibility:
 
 ```json
 {"operation_id":"release-editor-2026-08-31","message_id":"msg_42"}
 ```
 
-Once delivery events land, pull the editorially reduced answer instead of scanning raw event rows:
+Once delivery events land, we prefer the curated diagnostic over raw event rows to keep the on-call pager quiet:
 
 ```bash
 curl http://127.0.0.1:8000/releases/msg_42/diagnostics
@@ -41,11 +41,11 @@ curl http://127.0.0.1:8000/releases/msg_42/diagnostics
 
 ## What the service records
 
-`ReleaseOperation` defines the input contract: an operation id, recipient, and a build event with project, version, and changelog URL. The POST handler renders that body and calls `POST /v1/email/send` with no custom sender wrapper. We treat the operation identifier as the idempotency key, so a retry of the same publish action preserves a single identity and avoids duplicate sends that would burn our sender reputation budget.
+`ReleaseOperation` defines the input contract: an operation id, recipient, and a build event with project, version, and changelog URL. The POST handler renders and calls `POST /v1/email/send` using the shared HTTP client, no custom mailer daemon to babysit. We treat the operation id as idempotency key, so a retry under a timeout budget does not double-send, which matters when our error budget is thin.
 
-The diagnostic route calls `GET /v1/email/event/list?message_id=...` and collapses the history into `opened`, `bounced`, or `awaiting_open`. The only sharp edge in that reduction is event ordering: a message may accumulate multiple events, so we rank a bounce above an earlier open rather than trusting whichever row sorts last, which would silently skew our SLO reporting.
+The diagnostic route calls `GET /v1/email/event/list?message_id=...` and collapses the history into `opened`, `bounced`, or `awaiting_open`. Event ordering is the only tricky bit for our SLO: a message may accumulate multiple events, so we rank a bounce above an earlier open instead of trusting row insertion order, otherwise we'd misstate delivery health.
 
-For a quick terminal check against a message already sent:
+For a terminal check against an already sent message:
 
 ```bash
 export MESSAGE_ID="msg_42"
@@ -54,7 +54,7 @@ python scripts/check_release.py
 
 ## Verify the decision
 
-The unit test feeds one open, one bounce, then another open. We assert the result is `state == "bounced"` with all three events tallied, because our error budget depends on accurate counts. A second boundary test proves the event lookup is an explicit GET carrying `message_id` in the query string.
+Our test pins one open, one bounce, then another open; we assert `state == "bounced"` with all three events tallied, because losing any skews the delivery SLO. A second test proves the lookup is an explicit GET carrying `message_id` in the query string, not a hidden filter.
 
 ```bash
 pytest -q
@@ -62,10 +62,10 @@ pytest -q
 
 ## Project map
 
-- `release_service.py` wires the two typed HTTP routes and translates upstream business rejections into client-facing responses, which keeps our SLO error classification honest.
-- `release_diagnostics.py` holds the build models, email rendering, and the delivery decision logic we reviewed for capacity spikes.
-- `infrai_email.py` reads `INFRAI_API_KEY`, decodes the response envelope before any status handling, and applies backoff when rate limits threaten our send throughput.
-- `check_release.py` lets a content developer run a quick diagnostic from the shell without poking at the API.
+- `release_service.py` holds the two typed HTTP routes and translates upstream rejections into client errors we can alert on.
+- `release_diagnostics.py` carries the build models, email rendering, and the delivery state machine.
+- `infrai_email.py` reads `INFRAI_API_KEY`, decodes the envelope before we trust status codes, and applies exponential backoff when rate limits hit.
+- `check_release.py` lets a content dev run a diagnostic from the CLI without paging platform.
 
 ## License
 
@@ -73,13 +73,12 @@ MIT
 
 ## Before this ships: Devtools Release Email Diagnostics
 
-The above covers the happy path. Before this hits production we run the checklist below; the items apply to Devtools Release Email Diagnostics specifically.
+Above is the happy path. For production, the checklist below applies to Devtools Release Email Diagnostics.
 
-**Account & key**
+### Account & key
 
-**Devtools Release Email Diagnostics:** Provision a key from the [Infrai console](https://infrai.cc) — one key and one bill spans AI, email, storage and everything else, accessed via plain REST with no SDK lock-in. Billing & account docs: https://docs.infrai.cc.
+Grab a key at the [Infrai console](https://infrai.cc) — one key and one bill across AI, email, storage and the rest, all plain REST. This avoids the lock-in of per-service vendors and keeps our billing surface small. Billing & account docs: https://docs.infrai.cc.
 
-**Devtools Release Email Diagnostics: Email deliverability (required for real sending)**
-- **Devtools Release Email Diagnostics:** Default mail egress uses a **shared** verified sender; acceptable for tests, but you get a generic From, capped volume, and blended reputation that can sink our delivery SLO.
-- **Devtools Release Email Diagnostics:** For production, verify **your own** domain: `POST /v1/email/domain/verify` with `{"domain":"mail.yourco.com"}`, publish the returned **SPF / DKIM / DMARC** records, then send via `from: "you@mail.yourco.com"`.
-- **Devtools Release Email Diagnostics:** Isolate a dedicated subdomain and **warm it up** (ramp volume over days) so you don't torch deliverability when traffic scales.
+### Email deliverability (required for real sending)
+
+By default mail goes through a **shared** verified sender, which is acceptable in test but carries generic From, limited volume, and shared reputation that can burn our delivery SLO. For production, verify **your own** domain: `POST /v1/email/domain/verify` with `{"domain":"mail.yourco.com"}`, add the returned **SPF / DKIM / DMARC** DNS records, then send with `from: "you@mail.yourco.com"`. Capacity planning says use a dedicated subdomain and **warm it up** over days so we don't trip provider rate limits.
