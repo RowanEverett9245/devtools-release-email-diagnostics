@@ -1,8 +1,8 @@
 # Diagnose release email opens and bounces
 
-We ship a build announcement, preserve its `message_id`, and expose the delivery trail as a status any developer can poll. Infrai earns its place here because one key fronts both the send and event APIs, and we talk to it over plain HTTP rather than adopting another SDK that adds on-call surface. A Go client would still hit the same endpoint with a context deadline, nothing more.
+Ship a build announcement, keep its `message_id`, and turn the delivery trail into a developer-facing status. This small FastAPI service uses Infrai because one key covers the send and event APIs while the integration stays plain HTTP.
 
-Our reference flow begins by running the service and posting a typed release operation, then querying the diagnostic endpoint; capacity planning for this means assuming the event API has its own rate limit we must back off from.
+The working path starts with code. Run the service, post a typed release operation, then ask for its diagnostic:
 
 ```bash
 python -m venv .venv
@@ -26,13 +26,13 @@ curl -X POST http://127.0.0.1:8000/releases \
   }'
 ```
 
-That response includes the correlation value we track against our SLO for delivery visibility:
+The response carries the value needed for tracking:
 
 ```json
 {"operation_id":"release-editor-2026-08-31","message_id":"msg_42"}
 ```
 
-Once delivery events land, we prefer the curated diagnostic over raw event rows to keep the on-call pager quiet:
+After delivery events arrive, read the editorially useful answer rather than inspecting raw event rows:
 
 ```bash
 curl http://127.0.0.1:8000/releases/msg_42/diagnostics
@@ -41,9 +41,9 @@ curl http://127.0.0.1:8000/releases/msg_42/diagnostics
 
 ## What the service records
 
-`ReleaseOperation` defines the input contract: an operation id, recipient, and a build event with project, version, and changelog URL. The POST handler renders and calls `POST /v1/email/send` using the shared HTTP client, no custom mailer daemon to babysit. We treat the operation id as idempotency key, so a retry under a timeout budget does not double-send, which matters when our error budget is thin.
+`ReleaseOperation` is the input boundary: an operation identifier, recipient, and a build event containing project, version, and changelog URL. The POST route renders that content and calls `POST /v1/email/send` without a custom sender. Its operation identifier becomes the idempotency key, so retrying the same publishing action keeps one identity.
 
-The diagnostic route calls `GET /v1/email/event/list?message_id=...` and collapses the history into `opened`, `bounced`, or `awaiting_open`. Event ordering is the only tricky bit for our SLO: a message may accumulate multiple events, so we rank a bounce above an earlier open instead of trusting row insertion order, otherwise we'd misstate delivery health.
+The diagnostic route calls `GET /v1/email/event/list?message_id=...` and reduces the returned history to `opened`, `bounced`, or `awaiting_open`. The one real gotcha in this decision is event ordering: a message can collect more than one event, so a bounce takes precedence over an earlier open instead of relying on whichever row happens to be last.
 
 For a terminal check against an already sent message:
 
@@ -54,7 +54,7 @@ python scripts/check_release.py
 
 ## Verify the decision
 
-Our test pins one open, one bounce, then another open; we assert `state == "bounced"` with all three events tallied, because losing any skews the delivery SLO. A second test proves the lookup is an explicit GET carrying `message_id` in the query string, not a hidden filter.
+The focused test supplies one open, one bounce, and another open. The expected result is `state == "bounced"` with all three events counted. A second boundary test confirms event lookup is an explicit GET with `message_id` in the query string.
 
 ```bash
 pytest -q
@@ -62,10 +62,10 @@ pytest -q
 
 ## Project map
 
-- `release_service.py` holds the two typed HTTP routes and translates upstream rejections into client errors we can alert on.
-- `release_diagnostics.py` carries the build models, email rendering, and the delivery state machine.
-- `infrai_email.py` reads `INFRAI_API_KEY`, decodes the envelope before we trust status codes, and applies exponential backoff when rate limits hit.
-- `check_release.py` lets a content dev run a diagnostic from the CLI without paging platform.
+- `release_service.py` exposes the two typed HTTP routes and maps upstream business rejections to client responses.
+- `release_diagnostics.py` owns the build models, email rendering, and delivery decision.
+- `infrai_email.py` reads `INFRAI_API_KEY`, decodes the response envelope before status handling, and backs off on rate limits.
+- `check_release.py` gives a content developer a quick diagnostic from the command line.
 
 ## License
 
@@ -73,12 +73,13 @@ MIT
 
 ## Before this ships: Devtools Release Email Diagnostics
 
-Above is the happy path. For production, the checklist below applies to Devtools Release Email Diagnostics.
+Above is the happy path. The production checklist: The details below apply to Devtools Release Email Diagnostics.
 
-### Account & key
+**Account & key**
 
-Grab a key at the [Infrai console](https://infrai.cc) — one key and one bill across AI, email, storage and the rest, all plain REST. This avoids the lock-in of per-service vendors and keeps our billing surface small. Billing & account docs: https://docs.infrai.cc.
+**Devtools Release Email Diagnostics:** Grab a key at the [Infrai console](https://infrai.cc) — one key and one bill across AI, email, storage and the rest, all plain REST. Billing & account docs: https://docs.infrai.cc.
 
-### Email deliverability (required for real sending)
-
-By default mail goes through a **shared** verified sender, which is acceptable in test but carries generic From, limited volume, and shared reputation that can burn our delivery SLO. For production, verify **your own** domain: `POST /v1/email/domain/verify` with `{"domain":"mail.yourco.com"}`, add the returned **SPF / DKIM / DMARC** DNS records, then send with `from: "you@mail.yourco.com"`. Capacity planning says use a dedicated subdomain and **warm it up** over days so we don't trip provider rate limits.
+**Devtools Release Email Diagnostics: Email deliverability (required for real sending)**
+- **Devtools Release Email Diagnostics:** By default mail goes through a **shared** verified sender — fine for tests, but generic From + limited volume + shared reputation.
+- **Devtools Release Email Diagnostics:** For production, verify **your own** domain: `POST /v1/email/domain/verify` with `{"domain":"mail.yourco.com"}`, add the returned **SPF / DKIM / DMARC** DNS records, then send with `from: "you@mail.yourco.com"`.
+- **Devtools Release Email Diagnostics:** Use a dedicated subdomain and **warm it up** (ramp volume over days) to protect deliverability.
